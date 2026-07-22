@@ -258,6 +258,83 @@ class TestScanMemoryContent:
 # =========================================================================
 # MemoryStore core operations
 # =========================================================================
+# Pollution density gate (deployed 2026-07-23 by ai-wiki R-NEW+19.x.x
+# pollution cleanup; hermes-agent commit history: 10c5e21 → reinstall wipe
+# → redeploy).  See memory-pollution-response-playbook §Pitfall 14/15/16.
+# =========================================================================
+
+class TestPollutionDensityGate:
+    """Hard gate against LLM mass-merge of a single token into memory entries.
+
+    Per-entry density > 2 rejects (verbs + noun-phrases); bare noun 实战 > 3
+    rejects.  Meta-context entries (含 污染/替换成/动词/替换为/pollution) bypass.
+    """
+
+    def test_legit_single_occurrence_passes(self):
+        """A normal ship-ritual mention of 实战承认 is allowed."""
+        from tools.memory_tool import _scan_memory_pollution
+        assert _scan_memory_pollution("实战承认 ship done cycle M335 verified") is None
+
+    def test_noun_phrase_x3_blocked(self):
+        """实战承认 × 3 in one entry is rejected."""
+        from tools.memory_tool import _scan_memory_pollution
+        result = _scan_memory_pollution("实战承认 ship 实战承认 ship 实战承认 ship done")
+        assert result is not None
+        assert "实战承认" in result
+
+    def test_verb_x3_blocked(self):
+        """拍定 × 3 in one entry is rejected (legacy verb mass-merge)."""
+        from tools.memory_tool import _scan_memory_pollution
+        result = _scan_memory_pollution("拍定方案 A 拍定方案 B 拍定方案 C")
+        assert result is not None
+        assert "拍定" in result
+
+    def test_bare_noun_x4_blocked(self):
+        """实战 bare noun × 4 (no phrase) is rejected."""
+        from tools.memory_tool import _scan_memory_pollution
+        result = _scan_memory_pollution("实战 ship 实战 ship 实战 ship 实战 ship done")
+        assert result is not None
+        assert "实战" in result
+
+    def test_meta_context_bypasses_density(self):
+        """Entries describing the pollution mechanism itself bypass the gate."""
+        from tools.memory_tool import _scan_memory_pollution
+        meta = "污染复盘: 实战承认 x5 实战承认 x5 实战承认 x5 实战承认 x5 实战承认 x5"
+        assert _scan_memory_pollution(meta) is None
+
+    def test_meta_context_english_bypasses_density(self):
+        """English pollution marker also bypasses (LLM writes EN audit)."""
+        from tools.memory_tool import _scan_memory_pollution
+        meta = "pollution mass-merge audit: 实战承认 x5 实战承认 x5 实战承认 x5"
+        assert _scan_memory_pollution(meta) is None
+
+    def test_scan_memory_content_returns_pollution_first(self):
+        """_scan_memory_content returns the pollution error before injection scan."""
+        from tools.memory_tool import _scan_memory_content
+        result = _scan_memory_content("实战承认 ship 实战承认 ship 实战承认 ship done")
+        assert result is not None
+        assert "pollution" in result.lower()
+
+    def test_add_rejects_pollution_entry(self, tmp_path, monkeypatch):
+        """MemoryStore.add blocks entries with pollution mass-merge."""
+        monkeypatch.setattr("tools.memory_tool.get_memory_dir", lambda: tmp_path)
+        s = MemoryStore(memory_char_limit=5000, user_char_limit=3000)
+        s.load_from_disk()
+        result = s.add("memory", "实战承认 ship 实战承认 ship 实战承认 ship done")
+        assert result["success"] is False
+        assert "pollution" in result["error"].lower()
+
+    def test_replace_rejects_pollution_entry(self, tmp_path, monkeypatch):
+        """MemoryStore.replace blocks new_content with pollution mass-merge."""
+        monkeypatch.setattr("tools.memory_tool.get_memory_dir", lambda: tmp_path)
+        s = MemoryStore(memory_char_limit=5000, user_char_limit=3000)
+        s.load_from_disk()
+        s.add("memory", "legit baseline entry")
+        result = s.replace("memory", "legit baseline entry",
+                          "实战承认 ship 实战承认 ship 实战承认 ship replacement")
+        assert result["success"] is False
+        assert "pollution" in result["error"].lower()
+
 
 @pytest.fixture()
 def store(tmp_path, monkeypatch):

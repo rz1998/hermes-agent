@@ -84,9 +84,72 @@ ENTRY_DELIMITER = "\n§\n"
 
 from tools.threat_patterns import first_threat_message as _first_threat_message
 
+# Pollution density gate (hermes-agent commit history was 10c5e21, then secrets
+# reinstall wiped it — redeployed 2026-07-23 by ai-wiki pollution cleanup).
+#
+# Hard gate against LLM mass-merge of a single token (verb or noun-phrase) into
+# memory entries, which then enters the system prompt as a frozen snapshot and
+# persists across sessions.  Two layers:
+#
+#   1) Verb mass-merge (legacy 4-token table): 拍定/搞定/做一下/兜底 — same CJK
+#      verb collapse observed across all 2026-07-12 / 14 / 15 cases.
+#   2) Noun-phrase mass-merge (NEW 2026-07-23 ai-wiki R-NEW+19.x.x case):
+#      实战承认 × N ships silently into AGENTS.md + system prompt during
+#      3-round audit-fix report writing.  Bare noun 实战 × N also observed in
+#      the same session.  Per-entry density > MAX_DENSITY rejects; meta-marker
+#      exemption (entry 含 污染/替换成/动词/替换为 any one) skips density check.
+#
+# Density threshold is per-entry, NOT per-file.  Legit single-occurrence 实战承认
+# (e.g. "实战承认 ship done") is allowed; ≥3 stacked on one entry is not.
+_POLLUTION_VERB_TOKENS = ("拍定", "搞定", "做一下", "兜底")
+_POLLUTION_PHRASE_TOKENS = ("实战承认", "实战验证", "实战部署", "实战教训", "实战ship", "真值化")
+_POLLUTION_BARE_NOUNS = ("实战",)  # bare noun ≥3 triggers (实战承认 already covered by phrase list)
+_POLLUTION_DENSITY_MAX = 2
+_POLLUTION_META_MARKERS = ("污染", "替换成", "动词", "替换为", "pollution", "mass-merge", "mass merge")
+
+
+def _scan_memory_pollution(content: str) -> Optional[str]:
+    """Return error string when an entry contains mass-merge pollution.
+
+    Mass-merge = same token (verb or noun-phrase) repeated more than
+    ``_POLLUTION_DENSITY_MAX`` times in one entry.  Density is per-entry, not
+    per-file.  Meta-context entries that contain any of ``_POLLUTION_META_MARKERS``
+    are exempted because they describe the pollution mechanism itself.
+    """
+    if any(marker in content for marker in _POLLUTION_META_MARKERS):
+        return None
+    offenders: List[str] = []
+    for tok in _POLLUTION_VERB_TOKENS + _POLLUTION_PHRASE_TOKENS:
+        c = content.count(tok)
+        if c > _POLLUTION_DENSITY_MAX:
+            offenders.append(f"{tok}×{c}")
+    for tok in _POLLUTION_BARE_NOUNS:
+        c = content.count(tok)
+        if c > _POLLUTION_DENSITY_MAX + 1:
+            offenders.append(f"{tok}×{c}")
+    if not offenders:
+        return None
+    return (
+        "Blocked: entry contains pollution mass-merge "
+        f"({', '.join(offenders)}). Hard gate rejects entries where a single "
+        "verb/noun token repeats more than "
+        f"{_POLLUTION_DENSITY_MAX} times (or bare noun 实战 > 3). "
+        "Rewrite the entry using precise verbs/nouns instead of stacking one token. "
+        "If the entry is meta-context describing the pollution mechanism itself, "
+        "include one of the meta markers (污染/替换成/动词/替换为) to skip the gate."
+    )
+
 
 def _scan_memory_content(content: str) -> Optional[str]:
-    """Scan memory content for injection/exfil patterns. Returns error string if blocked."""
+    """Scan memory content for injection/exfil + pollution patterns.
+
+    Returns the first error string when blocked, else None.  Order matters:
+    pollution check runs FIRST so a mass-merge entry is rejected before the
+    injection scanner wastes a turn parsing it.
+    """
+    pollution_error = _scan_memory_pollution(content)
+    if pollution_error:
+        return pollution_error
     return _first_threat_message(content, scope="strict")
 
 
