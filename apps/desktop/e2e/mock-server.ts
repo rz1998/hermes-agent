@@ -20,6 +20,62 @@ import http from 'node:http'
 const CANNED_REPLY = 'Hello from the mock inference server! The full boot chain is working.'
 
 /**
+ * A marker that makes the mock emit a real blocking clarify tool call. Tests
+ * use it to hold a turn open while exercising busy-composer interactions.
+ */
+export const BLOCKING_CLARIFY_TRIGGER = 'E2E_BLOCKING_CLARIFY_TRIGGER'
+export const BLOCKING_CLARIFY_QUESTION = 'Keep this test turn running?'
+
+function includesBlockingClarifyTrigger(value: unknown): boolean {
+  if (typeof value === 'string') {
+    return value.includes(BLOCKING_CLARIFY_TRIGGER)
+  }
+
+  if (Array.isArray(value)) {
+    return value.some(includesBlockingClarifyTrigger)
+  }
+
+  if (value && typeof value === 'object') {
+    return Object.values(value).some(includesBlockingClarifyTrigger)
+  }
+
+  return false
+}
+
+function streamBlockingClarify(res: http.ServerResponse, model: string): void {
+  const toolCall = {
+    index: 0,
+    id: 'mock-clarify-call',
+    type: 'function',
+    function: {
+      name: 'clarify',
+      arguments: JSON.stringify({ question: BLOCKING_CLARIFY_QUESTION, choices: ['Yes', 'No'] })
+    }
+  }
+
+  res.write(
+    `data: ${JSON.stringify({
+      id: 'mock-completion',
+      object: 'chat.completion.chunk',
+      created: 0,
+      model,
+      choices: [{ index: 0, delta: { tool_calls: [toolCall] }, finish_reason: null }]
+    })}\n\n`
+  )
+  res.write(
+    `data: ${JSON.stringify({
+      id: 'mock-completion',
+      object: 'chat.completion.chunk',
+      created: 0,
+      model,
+      choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }]
+    })}\n\n`
+  )
+  res.write('data: [DONE]\n\n')
+  res.end()
+}
+
+/**
  * Start the mock server on an ephemeral port.
  *
  * @returns a handle with `port`, `url`, and `close()`.
@@ -50,10 +106,10 @@ export function startMockServer(): Promise<{ port: number; url: string; close: (
                 id: 'mock-model',
                 object: 'model',
                 created: 0,
-                owned_by: 'mock',
-              },
-            ],
-          }),
+                owned_by: 'mock'
+              }
+            ]
+          })
         )
         return
       }
@@ -82,8 +138,14 @@ export function startMockServer(): Promise<{ port: number; url: string; close: (
             res.writeHead(200, {
               'Content-Type': 'text/event-stream',
               'Cache-Control': 'no-cache',
-              Connection: 'keep-alive',
+              Connection: 'keep-alive'
             })
+
+            if (includesBlockingClarifyTrigger(parsed.messages)) {
+              streamBlockingClarify(res, model)
+
+              return
+            }
 
             // Send the content in a few chunks to simulate streaming.
             const words = CANNED_REPLY.split(' ')
@@ -102,10 +164,10 @@ export function startMockServer(): Promise<{ port: number; url: string; close: (
                       {
                         index: 0,
                         delta: {},
-                        finish_reason: 'stop',
-                      },
-                    ],
-                  })}\n\n`,
+                        finish_reason: 'stop'
+                      }
+                    ]
+                  })}\n\n`
                 )
                 res.write('data: [DONE]\n\n')
                 res.end()
@@ -123,10 +185,10 @@ export function startMockServer(): Promise<{ port: number; url: string; close: (
                     {
                       index: 0,
                       delta: { content: word },
-                      finish_reason: null,
-                    },
-                  ],
-                })}\n\n`,
+                      finish_reason: null
+                    }
+                  ]
+                })}\n\n`
               )
               i++
               // Small delay between chunks to simulate real streaming.
@@ -147,15 +209,15 @@ export function startMockServer(): Promise<{ port: number; url: string; close: (
                   {
                     index: 0,
                     message: { role: 'assistant', content: CANNED_REPLY },
-                    finish_reason: 'stop',
-                  },
+                    finish_reason: 'stop'
+                  }
                 ],
                 usage: {
                   prompt_tokens: 10,
                   completion_tokens: 20,
-                  total_tokens: 30,
-                },
-              }),
+                  total_tokens: 30
+                }
+              })
             )
           }
         })
@@ -189,14 +251,14 @@ export function startMockServer(): Promise<{ port: number; url: string; close: (
         url,
         close: () =>
           new Promise((resolveClose, rejectClose) => {
-            server.close((err) => {
+            server.close(err => {
               if (err) {
                 rejectClose(err)
               } else {
                 resolveClose()
               }
             })
-          }),
+          })
       })
     })
   })
